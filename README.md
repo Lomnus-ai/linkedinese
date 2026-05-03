@@ -1,8 +1,8 @@
-# LinkedIn Translator
+# Linkedinese
 
 A bidirectional translator between plain English and "LinkedIn Speak" — the performative, euphemism-heavy dialect of professional self-promotion. Type "I got fired and I need a job" and get back the appropriate `#OpenToWork #NewChapter #Grateful` post. Paste in a humblebrag and get back what the author probably meant — usually with a quiet "I'm tired" at the end.
 
-Built with FastAPI and the Anthropic Claude API.
+Built with Next.js, the Anthropic Claude API, and a pair of carefully-tuned system prompts.
 
 ## What it looks like
 
@@ -19,28 +19,23 @@ Built with FastAPI and the Anthropic Claude API.
 ```bash
 git clone https://github.com/Lomnus-ai/linkedinese.git
 cd linkedinese
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
-uv sync
-uv run uvicorn app:app --reload
+cp .env.example .env.local       # then fill in ANTHROPIC_API_KEY
+npm install
+npm run dev
 ```
 
-Open <http://localhost:8000> and translate.
+Open <http://localhost:3000> and translate.
 
-There's also a CLI:
-
-```bash
-uv run python linkedin_speak.py "I got fired and I need a job"
-uv run python linkedin_speak.py --plain "I'm humbled to share that I'm starting a new chapter..."
-```
+Rate limiting is env-gated — local dev runs without it. To enable it locally, also set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` in `.env.local` (see [Rate limiting](#rate-limiting) below).
 
 ## How it works
 
 Prompt engineering, not a fine-tuned model. Two carefully-tuned system prompts (one per direction) handle the style transfer. Each request:
 
-1. Loads the appropriate system prompt
-2. Sends it plus your input to Claude via the Anthropic API
-3. Streams the response back to the browser via Server-Sent Events
-4. Caches the system prompt server-side using Anthropic prompt caching (~90% off the input prefix on cache hits)
+1. Hits the Next.js API route at `/api/translate`
+2. Loads the appropriate prompt `.md` file from disk (cached after first read)
+3. Calls Claude via `@anthropic-ai/sdk` with prompt caching on the system prompt (~90% off the input prefix on cache hits)
+4. Streams the response back to the browser as plain text chunks via the Web Streams API
 
 The hard part isn't the LLM call — it's the prompts. They live in:
 
@@ -60,23 +55,59 @@ Pick a model per direction from the dropdown. Defaults are tuned for the difficu
 
 Haiku 4.5 is also available if you want it cheaper.
 
+## Rate limiting
+
+The `/api/translate` endpoint uses Upstash Redis + `@upstash/ratelimit` (sliding window, 10 requests/minute per IP) when `UPSTASH_REDIS_REST_URL` is set. If unset, rate limiting is skipped — fine for local dev, not what you want in production.
+
+To enable it:
+
+1. Create an account at <https://console.upstash.com>.
+2. Create a new Redis database (the free tier is more than enough).
+3. From the database's REST API tab, copy `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`.
+4. Set both in `.env.local` for local dev, and as Vercel project env vars for production.
+
+## Deploying to Vercel
+
+```bash
+npm i -g vercel
+vercel login
+vercel                                              # interactive — links project, deploys preview
+vercel env add ANTHROPIC_API_KEY production         # paste key when prompted
+vercel env add UPSTASH_REDIS_REST_URL production
+vercel env add UPSTASH_REDIS_REST_TOKEN production
+vercel --prod                                       # promote to production
+```
+
+Or import the repo through the Vercel dashboard and set the env vars there. Either way, after the first deploy you can wire up auto-deploy on push via `vercel git connect`.
+
 ## Project layout
 
 ```
-app.py                         FastAPI web app + /api/translate streaming endpoint
-linkedin_speak.py              CLI: linkedin_speak.py "I got fired" / --plain to reverse
+app/                           Next.js App Router
+  page.tsx                       UI — direction toggle, model picker, input/output, theme toggle
+  layout.tsx                     Root layout + theme provider
+  api/translate/route.ts         Streaming endpoint, rate-limited
+lib/
+  prompts.ts                     Loads + caches prompt .md files
+  models.ts                      Per-direction model registry + defaults
+  ratelimit.ts                   Upstash rate limiter (env-gated)
 prompt_en_to_linkedin.md       System prompt — plain → LinkedIn
 prompt_linkedin_to_en.md       System prompt — LinkedIn → plain
-run_experiment.py              Offline harness: runs cases.json through every model + LLM judge
-cases.json                     Curated and hard-mode test cases for both directions
-static/                        Frontend (vanilla HTML/CSS/JS, no build step)
-runs/                          Experiment outputs (results.json, summary.md), gitignored
+linkedin_speak.py              Python CLI for prompt iteration (not deployed)
+run_experiment.py              Offline experiment harness with LLM judge
+cases.json                     Test cases for both directions
 screenshots/                   The pictures above
 ```
 
+## Stack
+
+Next.js 15 (App Router) · TypeScript · Tailwind · `next-themes` (dark mode) · Radix UI primitives (Select, Toggle Group) · `@anthropic-ai/sdk` · `@upstash/ratelimit`. Deployed on Vercel.
+
+The Python CLI and experiment harness use `anthropic` + `python-dotenv` only — kept around because tuning the prompts is much faster from the terminal than through the web UI.
+
 ## Constraints
 
-- Rate limit: 10 requests/minute per IP (`slowapi`)
+- Rate limit: 10 requests/minute per IP (when Upstash is configured)
 - Max input: 10,000 characters
 - The English → LinkedIn direction will refuse to invent facts. If you don't mention a team, it won't thank one. If you don't say how long you worked somewhere, it won't add "after nearly a decade." Generic LinkedIn slop is the failure mode the prompt was built to avoid.
 
